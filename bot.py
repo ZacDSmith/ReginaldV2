@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 def run_bot():
     load_dotenv()
-    TOKEN = os.getenv('TOKEN')
+    token = os.getenv('TOKEN')
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
@@ -25,7 +25,7 @@ def run_bot():
         await interaction.response.send_message(f"Hey {interaction.user.mention}! This is a slash command!")
 
     @tree.command(name="clear")
-    async def clear(ctx: commands.Context, amount: int,):
+    async def clear(ctx: commands.Context, amount: int):
         try:
             await ctx.response.send_message(f"Clearing {amount} messages...", ephemeral=True)
             channel = await ctx.guild.fetch_channel(ctx.channel.id)
@@ -34,4 +34,4 @@ def run_bot():
         except Exception as e:
             print(e)
 
-    client.run(token=TOKEN)
+    client.run(token=token)
