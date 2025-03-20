@@ -75,8 +75,6 @@ def run_bot():
             voice_clients[interaction.guild.id] = voice_client
         except Exception as e:
             print(e)
-            await interaction.response.send_message("Failed to connect to the voice channel.", ephemeral=True)
-            return
 
         # Respond to the interaction
         await interaction.response.send_message(f"{user.name} is playing: {url}")
