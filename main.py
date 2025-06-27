@@ -5,6 +5,10 @@ import yt_dlp as youtube_dl
 import asyncio
 import os
 from dotenv import load_dotenv
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
@@ -157,6 +161,18 @@ async def play_next(guild):
 
     voice_client.play(new_player, after=after_playing)
     queue.now_playing = new_player
+
+
+@bot.tree.command(name="random", description="Sends random meme")
+async def random(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    api_url = os.environ['MEME']  # Use HTTP, not HTTPS
+
+    response = requests.get(api_url, verify=False)
+    embed = discord.Embed(title="Here's a random meme!")
+    embed.set_image(url=response.text)
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="play", description="Play a song from YouTube")
