@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import yt_dlp as youtube_dl
+import yt_dlp
 import asyncio
 import os
 from dotenv import load_dotenv
@@ -11,9 +12,6 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
-
-# Suppress noise about console usage from errors
-youtube_dl.utils.bug_reports_message = lambda: ''
 
 
 class MusicBot(commands.Bot):
@@ -36,48 +34,41 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'extract_flat': 'in_playlist',
+}
 
-# Audio source for YouTube playback
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+
 class YTDLSource(discord.PCMVolumeTransformer):
-    YTDL_OPTIONS = {
-        'format': 'bestaudio/best',
-        'extractaudio': True,
-        'audioformat': 'mp3',
-        'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-        'restrictfilenames': True,
-        'noplaylist': True,
-        'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'logtostderr': False,
-        'quiet': True,
-        'no_warnings': True,
-        'default_search': 'auto',
-        'source_address': '0.0.0.0',
-    }
-
-    FFMPEG_OPTIONS = {
-        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-        'options': '-vn',
-    }
-
-    def __init__(self, source, *, data, volume=0.5):
+    def __init__(self, source, *, data, url, volume=0.5):
         super().__init__(source, volume)
         self.data = data
         self.title = data.get('title')
-        self.url = data.get('url')
+        self.url = url
 
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        ytdl = youtube_dl.YoutubeDL(cls.YTDL_OPTIONS)
-
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
 
         if 'entries' in data:
             data = data['entries'][0]
 
         filename = data['url'] if stream else ytdl.prepare_filename(data)
-        return cls(discord.FFmpegPCMAudio(filename, **cls.FFMPEG_OPTIONS), data=data)
+
+        return cls(
+            discord.FFmpegPCMAudio(filename, **{
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn'
+            }),
+            data=data,
+            url=url
+        )
 
 
 # Queue system
@@ -173,6 +164,16 @@ async def random(interaction: discord.Interaction):
     embed = discord.Embed(title="Here's a random meme!")
     embed.set_image(url=response.text)
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="addmeme", description="Add a meme")
+async def addmeme(interaction: discord.Interaction, url: str):
+    await interaction.response.defer()
+    api_url = os.environ['CREATEMEME']
+    headers = {"Content-Type": "application/json"}
+    post = {"Link": f"{url}"}
+    test = requests.post(api_url, headers=headers, json=post, verify=False)
+    await interaction.followup.send(test.text)
 
 
 @bot.tree.command(name="play", description="Play a song from YouTube")
