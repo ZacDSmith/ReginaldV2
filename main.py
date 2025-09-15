@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 import requests
 import urllib3
+from gtts import gTTS
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -164,6 +165,39 @@ async def random(interaction: discord.Interaction):
     embed = discord.Embed(title="Here's a random meme!")
     embed.set_image(url=response.text)
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="tts", description="Text to speech")
+async def tts(interaction: discord.Interaction, text: str):
+    try:
+        await interaction.response.defer()
+
+        # Check if user is in a voice channel
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.followup.send("You need to be in a voice channel to use this command!")
+
+        # Connect bot to voice channel
+        voice_client = interaction.guild.voice_client
+        if not voice_client:
+            voice_client = await interaction.user.voice.channel.connect()
+
+        # If already speaking, queue or reject
+        if voice_client.is_playing():
+            return await interaction.followup.send("Wait until I'm finished speaking!")
+
+        # Generate TTS audio
+        tts = gTTS(text=text, lang="en")
+        file_path = "tts.mp3"
+        tts.save(file_path)
+
+        # Play audio in VC
+        source = discord.FFmpegPCMAudio(file_path)
+        voice_client.play(source, after=lambda e: os.remove(file_path))
+
+        await interaction.followup.send(f"Speaking: {text}")
+    except Exception as e:
+        await interaction.response.defer()
+        await interaction.followup.send(f"{e}")
 
 
 @bot.tree.command(name="addmeme", description="Add a meme")
