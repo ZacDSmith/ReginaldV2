@@ -196,8 +196,10 @@ async def tts(interaction: discord.Interaction, text: str):
 
         await interaction.followup.send(f"Speaking: {text}")
     except Exception as e:
-        await interaction.response.defer()
-        await interaction.followup.send(f"{e}")
+        if interaction.response.is_done():
+            await interaction.followup.send(str(e))
+        else:
+            await interaction.response.send_message(str(e), ephemeral=True)
 
 
 @bot.tree.command(name="addmeme", description="Add a meme")
@@ -248,42 +250,27 @@ async def play(interaction: discord.Interaction, url: str):
         await interaction.followup.send(f"Added to queue: {player.title}")
 
 
-@bot.tree.command(name="clear")
-async def clear(ctx: commands.Context, amount: int):
-    try:
-        await ctx.response.send_message(f"Clearing {amount} messages...", ephemeral=True)
-        channel = await ctx.guild.fetch_channel(ctx.channel.id)
-        await discord.channel.TextChannel.purge(channel, limit=amount)
+@bot.tree.command(name="clear", description="Clear messages")
+async def clear(interaction: discord.Interaction, amount: int):
+    await interaction.response.defer(ephemeral=True)
 
-    except Exception as e:
-        print(e)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(
+        f"Cleared {len(deleted)} messages.",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="skip", description="Skip the current song")
 async def skip(interaction: discord.Interaction):
-    """Skip the current song"""
     await interaction.response.defer()
 
     voice_client = interaction.guild.voice_client
     if not voice_client or not voice_client.is_playing():
         return await interaction.followup.send("Nothing is playing right now!")
 
-    # Stop the current player
-    voice_client.stop()
-
-    # Get the queue
-    if interaction.guild.id not in bot.queues:
-        return await interaction.followup.send("No queue exists!")
-
-    queue = bot.queues[interaction.guild.id]
-
-    # Play the next track
-    await play_next(interaction.guild)
-
-    if queue.current_track:
-        await interaction.followup.send(f"Skipped! Now playing: {queue.current_track.title}")
-    else:
-        await interaction.followup.send("Skipped! The queue is now empty.")
+    voice_client.stop()  # after callback will call play_next()
+    await interaction.followup.send("Skipped!")
 
 
 @bot.tree.command(name="queue", description="Show the current queue")
