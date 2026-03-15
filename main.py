@@ -1,16 +1,14 @@
 import discord
-from discord import app_commands
 from discord.ext import commands
-import yt_dlp as youtube_dl
 import yt_dlp
 import asyncio
 import os
+import tempfile
+from typing import Optional
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 import requests
-import urllib3
 from gtts import gTTS
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
@@ -29,27 +27,29 @@ class MusicBot(commands.Bot):
         self.queues = {}  # Guild ID -> Queue
 
     async def setup_hook(self):
-        # Sync slash commands
         await self.tree.sync()
 
 
 bot = MusicBot()
 
 YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'extract_flat': 'in_playlist',
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "extract_flat": "in_playlist",
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+
+SUPPORTED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac")
 
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, url, volume=0.5):
         super().__init__(source, volume)
         self.data = data
-        self.title = data.get('title')
+        self.title = data.get("title")
         self.url = url
 
     @classmethod
@@ -57,22 +57,33 @@ class YTDLSource(discord.PCMVolumeTransformer):
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
 
-        if 'entries' in data:
-            data = data['entries'][0]
+        if "entries" in data:
+            data = data["entries"][0]
 
-        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        filename = data["url"] if stream else ytdl.prepare_filename(data)
 
         return cls(
-            discord.FFmpegPCMAudio(filename, **{
-                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                'options': '-vn'
-            }),
+            discord.FFmpegPCMAudio(
+                filename,
+                **{
+                    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+                    "options": "-vn",
+                },
+            ),
             data=data,
-            url=url
+            url=url,
+        )
+
+    @classmethod
+    async def from_audio_file(cls, source_path_or_url, *, title=None):
+        track_title = title or os.path.basename(urlparse(source_path_or_url).path) or "Audio Track"
+        return cls(
+            discord.FFmpegPCMAudio(source_path_or_url, options="-vn"),
+            data={"title": track_title, "is_audio_file": True},
+            url=source_path_or_url,
         )
 
 
-# Queue system
 class Queue:
     def __init__(self):
         self._queue = []
@@ -85,7 +96,7 @@ class Queue:
         if len(self._queue) == 0:
             return None
 
-        self.now_playing = self._queue.pop(0)  # Remove and return first item
+        self.now_playing = self._queue.pop(0)
         return self.now_playing
 
     def clear(self):
@@ -109,13 +120,20 @@ class Queue:
         return len(self._queue)
 
 
+def is_supported_audio_source(source: str) -> bool:
+    parsed = urlparse(source)
+    if parsed.path.lower().endswith(SUPPORTED_AUDIO_EXTENSIONS):
+        return True
+
+    return os.path.isfile(source) and source.lower().endswith(SUPPORTED_AUDIO_EXTENSIONS)
+
+
 async def play_next(guild):
     queue = bot.queues.get(guild.id)
     if not queue or queue.is_empty:
-        # Disconnect after some time if queue is empty
         voice_client = guild.voice_client
         if voice_client and not voice_client.is_playing():
-            await asyncio.sleep(300)  # 5 minutes
+            await asyncio.sleep(300)
             if not voice_client.is_playing():
                 await voice_client.disconnect()
                 del bot.queues[guild.id]
@@ -125,17 +143,17 @@ async def play_next(guild):
     if not voice_client:
         return
 
-    # Get the next track (this removes it from queue)
     player = queue.next()
     if not player:
         return
 
     try:
-        # Create fresh source to avoid issues
-        new_player = await YTDLSource.from_url(player.url, loop=bot.loop, stream=True)
+        if player.data.get("is_audio_file"):
+            new_player = await YTDLSource.from_audio_file(player.url, title=player.title)
+        else:
+            new_player = await YTDLSource.from_url(player.url, loop=bot.loop, stream=True)
     except Exception as e:
         print(f"Error creating player: {e}")
-        # Try to play next if this one fails
         await play_next(guild)
         return
 
@@ -143,7 +161,6 @@ async def play_next(guild):
         if error:
             print(f"Player error: {error}")
 
-        # Schedule next track
         coro = play_next(guild)
         fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
         try:
@@ -159,9 +176,14 @@ async def play_next(guild):
 async def random(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    api_url = os.environ['MEME']  # Use HTTP, not HTTPS
+    api_url = os.environ["MEME"]
 
-    response = requests.get(api_url, verify=False)
+    try:
+        response = requests.get(api_url, timeout=15)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        return await interaction.followup.send(f"Failed to fetch meme: {error}")
+
     embed = discord.Embed(title="Here's a random meme!")
     embed.set_image(url=response.text)
     await interaction.followup.send(embed=embed)
@@ -172,27 +194,28 @@ async def tts(interaction: discord.Interaction, text: str):
     try:
         await interaction.response.defer()
 
-        # Check if user is in a voice channel
         if not interaction.user.voice or not interaction.user.voice.channel:
             return await interaction.followup.send("You need to be in a voice channel to use this command!")
 
-        # Connect bot to voice channel
         voice_client = interaction.guild.voice_client
         if not voice_client:
             voice_client = await interaction.user.voice.channel.connect()
 
-        # If already speaking, queue or reject
         if voice_client.is_playing():
             return await interaction.followup.send("Wait until I'm finished speaking!")
 
-        # Generate TTS audio
-        tts = gTTS(text=text, lang="en")
-        file_path = "tts.mp3"
-        tts.save(file_path)
+        tts_audio = gTTS(text=text, lang="en")
+        temp_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        file_path = temp_file.name
+        temp_file.close()
+        tts_audio.save(file_path)
 
-        # Play audio in VC
+        def cleanup_tts(_):
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
         source = discord.FFmpegPCMAudio(file_path)
-        voice_client.play(source, after=lambda e: os.remove(file_path))
+        voice_client.play(source, after=cleanup_tts)
 
         await interaction.followup.send(f"Speaking: {text}")
     except Exception as e:
@@ -205,44 +228,63 @@ async def tts(interaction: discord.Interaction, text: str):
 @bot.tree.command(name="addmeme", description="Add a meme")
 async def addmeme(interaction: discord.Interaction, url: str):
     await interaction.response.defer()
-    api_url = os.environ['CREATEMEME']
+    api_url = os.environ["CREATEMEME"]
     headers = {"Content-Type": "application/json"}
     post = {"Link": f"{url}"}
-    test = requests.post(api_url, headers=headers, json=post, verify=False)
-    await interaction.followup.send(test.text)
+
+    try:
+        response = requests.post(api_url, headers=headers, json=post, timeout=15)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        return await interaction.followup.send(f"Failed to add meme: {error}")
+
+    await interaction.followup.send(response.text)
 
 
-@bot.tree.command(name="play", description="Play a song from YouTube")
-async def play(interaction: discord.Interaction, url: str):
-    """Play a song from YouTube"""
-
+@bot.tree.command(name="play", description="Play from YouTube URL or uploaded audio file")
+async def play(
+    interaction: discord.Interaction,
+    url: Optional[str] = None,
+    file: Optional[discord.Attachment] = None,
+):
     await interaction.response.defer()
 
-    # Check if user is in a voice channel
     if not interaction.user.voice or not interaction.user.voice.channel:
         return await interaction.followup.send("You need to be in a voice channel to use this command!")
 
-    # Get or create queue for guild
+    if not url and not file:
+        return await interaction.followup.send("Provide a YouTube URL or upload an audio file.")
+
+    if url and file:
+        return await interaction.followup.send("Please provide either a URL or a file, not both.")
+
     if interaction.guild.id not in bot.queues:
         bot.queues[interaction.guild.id] = Queue()
 
     queue = bot.queues[interaction.guild.id]
 
-    # Connect to voice channel if not already connected
     voice_client = interaction.guild.voice_client
     if not voice_client:
         voice_client = await interaction.user.voice.channel.connect()
 
-    # Process the query (URL or search)
+    source = url
+    if file:
+        if not file.filename.lower().endswith(SUPPORTED_AUDIO_EXTENSIONS):
+            allowed = ", ".join(SUPPORTED_AUDIO_EXTENSIONS)
+            return await interaction.followup.send(f"Only these audio attachments are supported: {allowed}")
+        source = file.url
+
     try:
-        player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
+        if source and is_supported_audio_source(source):
+            title = file.filename if file else None
+            player = await YTDLSource.from_audio_file(source, title=title)
+        else:
+            player = await YTDLSource.from_url(source, loop=bot.loop, stream=True)
     except Exception as e:
         return await interaction.followup.send(f"Error: {e}")
 
-    # Add to queue
     queue.add(player)
 
-    # If nothing is playing, start playback
     if not voice_client.is_playing():
         await play_next(interaction.guild)
         await interaction.followup.send(f"Now playing: {player.title}")
@@ -255,10 +297,7 @@ async def clear(interaction: discord.Interaction, amount: int):
     await interaction.response.defer(ephemeral=True)
 
     deleted = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(
-        f"Cleared {len(deleted)} messages.",
-        ephemeral=True
-    )
+    await interaction.followup.send(f"Cleared {len(deleted)} messages.", ephemeral=True)
 
 
 @bot.tree.command(name="skip", description="Skip the current song")
@@ -269,14 +308,12 @@ async def skip(interaction: discord.Interaction):
     if not voice_client or not voice_client.is_playing():
         return await interaction.followup.send("Nothing is playing right now!")
 
-    voice_client.stop()  # after callback will call play_next()
+    voice_client.stop()
     await interaction.followup.send("Skipped!")
 
 
 @bot.tree.command(name="queue", description="Show the current queue")
 async def show_queue(interaction: discord.Interaction):
-    """Show the current queue"""
-
     if interaction.guild.id not in bot.queues or bot.queues[interaction.guild.id].is_empty:
         return await interaction.response.send_message("The queue is empty!")
 
@@ -284,11 +321,9 @@ async def show_queue(interaction: discord.Interaction):
 
     embed = discord.Embed(title="Music Queue", color=discord.Color.blue())
 
-    # Current track
     if queue.now_playing:
         embed.add_field(name="Now Playing", value=queue.now_playing.title, inline=False)
 
-    # Upcoming tracks
     if len(queue.upcoming) > 0:
         upcoming = "\n".join(f"{i + 1}. {track.title}" for i, track in enumerate(queue.upcoming))
         embed.add_field(name="Up Next", value=upcoming, inline=False)
@@ -298,8 +333,6 @@ async def show_queue(interaction: discord.Interaction):
 
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause(interaction: discord.Interaction):
-    """Pause the current song"""
-
     voice_client = interaction.guild.voice_client
     if not voice_client or not voice_client.is_playing():
         return await interaction.response.send_message("Nothing is playing right now!")
@@ -313,8 +346,6 @@ async def pause(interaction: discord.Interaction):
 
 @bot.tree.command(name="resume", description="Resume the current song")
 async def resume(interaction: discord.Interaction):
-    """Resume the current song"""
-
     voice_client = interaction.guild.voice_client
     if not voice_client or not voice_client.is_paused():
         return await interaction.response.send_message("Nothing is paused right now!")
@@ -325,8 +356,6 @@ async def resume(interaction: discord.Interaction):
 
 @bot.tree.command(name="stop", description="Stop the music and clear the queue")
 async def stop(interaction: discord.Interaction):
-    """Stop the music and clear the queue"""
-
     voice_client = interaction.guild.voice_client
     if not voice_client or not (voice_client.is_playing() or voice_client.is_paused()):
         return await interaction.response.send_message("Nothing is playing right now!")
@@ -340,8 +369,6 @@ async def stop(interaction: discord.Interaction):
 
 @bot.tree.command(name="disconnect", description="Disconnect the bot from voice")
 async def disconnect(interaction: discord.Interaction):
-    """Disconnect the bot from voice"""
-
     voice_client = interaction.guild.voice_client
     if not voice_client:
         return await interaction.response.send_message("I'm not connected to a voice channel!")
@@ -355,9 +382,9 @@ async def disconnect(interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
-    print('------')
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("------")
 
 
 if __name__ == "__main__":
-    bot.run(token=os.environ['TOKEN'])
+    bot.run(token=os.environ["TOKEN"])
