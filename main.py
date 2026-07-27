@@ -62,11 +62,20 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
         filename = data["url"] if stream else ytdl.prepare_filename(data)
 
+        # YouTube stream URLs are signed and commonly require the headers
+        # returned by yt-dlp. Without them, FFmpeg often receives HTTP 403.
+        before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+        if stream and data.get("http_headers"):
+            headers = "\r\n".join(
+                f"{key}: {value}" for key, value in data["http_headers"].items()
+            )
+            before_options += f' -headers "{headers}\r\n"'
+
         return cls(
             discord.FFmpegPCMAudio(
                 filename,
                 **{
-                    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+                    "before_options": before_options,
                     "options": "-vn",
                 },
             ),

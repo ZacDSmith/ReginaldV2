@@ -1,0 +1,7 @@
+discord.py
+yt-dlp
+python-dotenv
+requests
+gTTS
+PyNaCl
+davey
