@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
+import aiohttp
 import os
 import tempfile
 from typing import Optional
@@ -129,6 +130,40 @@ class Queue:
         return len(self._queue)
 
 
+async def connect_to_voice(channel):
+    """Join channel, replacing stale voice clients after a closed WebSocket."""
+    guild = channel.guild
+    voice_client = guild.voice_client
+
+    if voice_client and voice_client.is_connected():
+        if voice_client.channel != channel:
+            await voice_client.move_to(channel)
+        return voice_client
+
+    if voice_client:
+        try:
+            await voice_client.disconnect(force=True)
+        except (discord.ClientException, aiohttp.ClientConnectionError):
+            pass
+
+    last_error = None
+    for attempt in range(2):
+        try:
+            return await channel.connect(timeout=20, reconnect=True)
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError, discord.ClientException) as error:
+            last_error = error
+            current = guild.voice_client
+            if current:
+                try:
+                    await current.disconnect(force=True)
+                except (discord.ClientException, aiohttp.ClientConnectionError):
+                    pass
+            if attempt == 0:
+                await asyncio.sleep(1)
+
+    raise last_error
+
+
 def is_supported_audio_source(source: str) -> bool:
     parsed = urlparse(source)
     if parsed.path.lower().endswith(SUPPORTED_AUDIO_EXTENSIONS):
@@ -206,9 +241,7 @@ async def tts(interaction: discord.Interaction, text: str):
         if not interaction.user.voice or not interaction.user.voice.channel:
             return await interaction.followup.send("You need to be in a voice channel to use this command!")
 
-        voice_client = interaction.guild.voice_client
-        if not voice_client:
-            voice_client = await interaction.user.voice.channel.connect()
+        voice_client = await connect_to_voice(interaction.user.voice.channel)
 
         if voice_client.is_playing():
             return await interaction.followup.send("Wait until I'm finished speaking!")
@@ -272,9 +305,10 @@ async def play(
 
     queue = bot.queues[interaction.guild.id]
 
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
-        voice_client = await interaction.user.voice.channel.connect()
+    try:
+        voice_client = await connect_to_voice(interaction.user.voice.channel)
+    except (aiohttp.ClientConnectionError, asyncio.TimeoutError, discord.ClientException) as error:
+        return await interaction.followup.send(f"Could not connect to voice: {error}")
 
     source = url
     if file:
